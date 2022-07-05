@@ -9,16 +9,23 @@ from model_vp import model as vinet_model
 from loss_vp import kldiv_loss
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 import warnings
 warnings.filterwarnings("ignore")
+
+
+summary = None
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Vinet Plus')
     parser.add_argument('--dataset_folder', "-d", required=True, type=str, help='Folder consisting of all the videos required for training purpose')
     parser.add_argument('--annotation_folder', "-a", required=True, type=str, help='Folder consisting of all the continuous saliency annotations for each video')
+    parser.add_argument('--log_dir', '-l', required=False, type=str, default=f'/ssd_scratch/cvit/{os.getlogin()}/logs/', help='Folder to log the outputs')
+    parser.add_argument('--checkpoint_path', '-c', required=False, type=str, default='', help='Path to the weights_<epoch>.pth file')
     parser.add_argument('--time_width', default=32, type=int, help='Time steps required for training and predicting the saliency map of last frame')
     parser.add_argument('--batch_size', default=1, type=int, help='Batch size per GPU for training')
-    parser.add_argument('--epochs', default=50, type=int, help='Total epochs required for training')
+    parser.add_argument('--epochs', default=200, type=int, help='Total epochs required for training')
     # Pytorch Distributed parameters
     parser.add_argument('--local_rank', type=int, help='Automatically passed by the PyTorch (Stores the rank of each process in the process group)')
     args = parser.parse_args()
@@ -29,7 +36,6 @@ def parse_args():
 def init_distributed(args):
     dist.init_process_group(backend="nccl", init_method='env://', world_size=args.number_of_gpus, rank=args.local_rank)
     torch.cuda.set_device(args.local_rank)
-    dist.barrier()
     def setup_for_distributed(is_master):
         """
         This function disables printing when not in master process
@@ -39,6 +45,7 @@ def init_distributed(args):
             sys.stdout = f
 
     setup_for_distributed(args.local_rank == 0)
+    dist.barrier() # Sync all the processes at this line (faster processes stop till all the processes can continue together)
 
 # MMVN (Encodings are shifted to cuda)
 def mmv_encodings(video_data):
@@ -91,15 +98,79 @@ def load_vinet_encoder_weights(file_weight, model):
                     print(' size? ' + name, param.size(), model_dict[name].size())
             else:
                 print(' name? ' + name)
-
         print('loaded')
-        model.backbone.load_state_dict(model_dict)
+        # model.backbone.load_state_dict(model_dict)
     else:
         print('weight file?')
+
+def train_one_epoch(epoch, train_dataloader, model, optimizer, criterion, vinet_mean, vinet_std):
+    train_dataloader.sampler.set_epoch(epoch)
+    model.train()
+    total_loss = 0
+
+    for i, data in enumerate(train_dataloader):
+        optimizer.zero_grad()
+
+        video_data, saliency_map_gt = data
+        # print(video_data.shape, saliency_map_gt.shape, video_data.dtype, saliency_map_gt.dtype, video_data.device, saliency_map_gt.device) # (batch_size, time_width, channels, height, width) (batch_size, 1, height, width) float32 float32 cpu cpu
+
+        # Finding MMV embeddings
+        mmv_embeddings = mmv_encodings(video_data)
+        # print([r.shape for r in mmv_embeddings]) # Each element is of the shape (batch_size, channels, time_width, height, width)
+
+        # ViNet preprocessings
+        video_data, saliency_map_gt = video_data.cuda(), saliency_map_gt.cuda()
+        video_data = vinet_preprocessings(video_data, vinet_mean, vinet_std)
+        # print(video_data.shape, saliency_map_gt.shape, video_data.dtype, saliency_map_gt.dtype, video_data.device, saliency_map_gt.device) # (batch_size, channels, time_width, height, width) (batch_size, 1, height, width) float32 float32 cuda cuda
+
+        pred_sal = model(video_data, mmv_embeddings)[:, 0, 0, :, :]
+
+        # print(f'Done {pred_sal.shape}') # (1, height, width)
+
+        loss = criterion(pred_sal, saliency_map_gt[:, 0, :, :])
+        loss.backward()
+        optimizer.step()
+
+        loss = loss.detach()
+        dist.reduce(loss, dst=0, op=dist.ReduceOp.SUM)
+        total_loss += loss.item()
+        
+        if args.local_rank == 0 and i == 0:
+            summary.add_image('Training Saliency/GT', saliency_map_gt[0, Ellipsis].cpu().numpy(), global_step=epoch)
+            summary.add_image('Training Saliency/Pred', pred_sal.detach().cpu().numpy(), global_step=epoch)
+
+        del video_data, saliency_map_gt, mmv_embeddings; gc.collect(); torch.cuda.empty_cache();
+    return total_loss
+
+def validate_one_epoch(epoch, validate_dataloader, model, criterion, vinet_mean, vinet_std):
+    validate_dataloader.sampler.set_epoch(epoch)
+    model.eval()
+    total_loss = 0
+
+    for data in validate_dataloader:
+        video_data, saliency_map_gt = data
+        mmv_embeddings = mmv_encodings(video_data)
+        video_data, saliency_map_gt = video_data.cuda(), saliency_map_gt.cuda()
+        video_data = vinet_preprocessings(video_data, vinet_mean, vinet_std)
+
+        with torch.no_grad():
+            pred_sal = model(video_data, mmv_embeddings)
+            loss = criterion(pred_sal, saliency_map_gt)
+            loss = loss.detach()
+            dist.reduce(loss, dst=0, op=dist.ReduceOp.SUM)
+            total_loss += loss.item()
+        
+        del video_data, saliency_map_gt, mmv_embeddings; gc.collect(); torch.cuda.empty_cache();
+    return total_loss
 
 if __name__ == '__main__':
     args = parse_args()
     init_distributed(args)
+    if args.checkpoint_path == "":
+        args.log_dir = os.path.join(args.log_dir, datetime.now().strftime(r"%Y-%m-%d#%H-%M-%S"))
+        os.makedirs(args.log_dir, exist_ok=True)
+    else:
+        args.log_dir = os.path.dirname(args.checkpoint_path)
 
     # For mean-std normalization for ViNet preprocessings
     vinet_mean = torch.FloatTensor([0.485, 0.456, 0.406]).cuda().reshape(1, 1, 3, 1, 1)
@@ -108,49 +179,57 @@ if __name__ == '__main__':
     vinet_height, vinet_width = 288, 512 # 16:9 * 26
 
     model = vinet_model.VideoSaliencyModel(args.time_width).cuda()
-    load_vinet_encoder_weights(os.path.join(os.path.dirname(vinet_model.__file__), 'S3D_kinetics400.pt'), model)
-    model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank])
-
-    criterion = kldiv_loss.KLDLoss()
-    optimizer = optim.Adam(model.parameters())
+    # criterion = kldiv_loss.KLDLoss().cuda()
+    # criterion = torch.nn.L1Loss()
+    # criterion = torch.nn.KLDivLoss().cuda()
+    criterion = kldiv_loss.kldiv
+    if args.checkpoint_path == "":
+        start_epoch = 0
+        load_vinet_encoder_weights(os.path.join(os.path.dirname(vinet_model.__file__), 'S3D_kinetics400.pt'), model)
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank])
+        optimizer = optim.Adam(model.parameters())
+    else:
+        checkpoint_dict = torch.load(args.checkpoint_path, map_location=next(model.parameters()).device)
+        start_epoch = checkpoint_dict['epoch'] + 1
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank])
+        model.load_state_dict(checkpoint_dict['model_state_dict'])
+        optimizer = optim.Adam(model.parameters())
+        optimizer.load_state_dict(checkpoint_dict['optimizer_state_dict'])
+        del checkpoint_dict
+    gc.collect(); torch.cuda.empty_cache();
 
     # Create dataset and dataloader
     train_dataset = Dhf1kDataset(args.dataset_folder, args.annotation_folder, args.time_width, 'train', (vinet_height, vinet_width), args.local_rank == 0)
-    train_sampler = DistributedSampler(dataset=train_dataset, shuffle=False)
-    train_dataloader = DataLoader(train_dataset, batch_size = args.batch_size, shuffle=False, num_workers = 1, sampler = train_sampler)
+    train_sampler = DistributedSampler(dataset=train_dataset, shuffle=True)
+    train_dataloader = DataLoader(train_dataset, batch_size = args.batch_size, shuffle=True, num_workers = 1, sampler = train_sampler)
     validate_dataset = Dhf1kDataset(args.dataset_folder, args.annotation_folder, args.time_width, 'validate', (vinet_height, vinet_width), args.local_rank == 0)
     validate_sampler = DistributedSampler(dataset=validate_dataset)
     validate_dataloader = DataLoader(validate_dataset, batch_size = 1, num_workers = 1, sampler = validate_sampler)
 
-    for epoch in range(args.epochs):
-        train_dataloader.sampler.set_epoch(epoch)
-        for data in tqdm.tqdm(train_dataloader, desc = 'data iteration', disable=(args.local_rank != 0)):
-            optimizer.zero_grad()
+    if args.local_rank == 0:
+        summary = SummaryWriter(log_dir=args.log_dir,
+                                flush_secs=1
+                               )
 
-            video_data, saliency_map_gt = data
-            # print(video_data.shape, saliency_map_gt.shape, video_data.dtype, saliency_map_gt.dtype, video_data.device, saliency_map_gt.device) # (batch_size, time_width, channels, height, width) (batch_size, 1, height, width) float32 float32 cpu cpu
-
-            # Finding MMV embeddings
-            mmv_embeddings = mmv_encodings(video_data)
-            # print([r.shape for r in mmv_embeddings]) # Each element is of the shape (batch_size, channels, time_width, height, width)
-
-            # ViNet preprocessings
-            video_data, saliency_map_gt = video_data.cuda(), saliency_map_gt.cuda()
-            video_data = vinet_preprocessings(video_data, vinet_mean, vinet_std)
-            # print(video_data.shape, saliency_map_gt.shape, video_data.dtype, saliency_map_gt.dtype, video_data.device, saliency_map_gt.device) # (batch_size, channels, time_width, height, width) (batch_size, 1, height, width) float32 float32 cuda cuda
-
-            pred_sal = model(video_data, mmv_embeddings)
-            # print(f'Done {pred_sal.shape}') # (1, 1, height, width)
-
-            pred_sal, saliency_map_gt = pred_sal[:, 0, :, :], saliency_map_gt[:, 0, :, :]
-
-            loss = criterion(pred_sal, saliency_map_gt)
-            loss.backward()
-            optimizer.step()
-
-            del video_data, saliency_map_gt, mmv_embeddings
-            gc.collect()
-            torch.cuda.empty_cache()
+    for epoch in tqdm.tqdm(range(start_epoch, args.epochs), desc = 'Epoch iteration', disable=(args.local_rank != 0)):
+        dist.barrier()
+        loss = train_one_epoch(epoch, train_dataloader, model, optimizer, criterion, vinet_mean, vinet_std)
+        if args.local_rank == 0:
+            summary.add_scalar("Training Loss", loss, global_step=epoch)
+        
+        if (epoch+1) % 5 == 0 and args.local_rank == 0:
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'epoch': epoch,
+                }, os.path.join(args.log_dir, f'weights_{epoch+1}.pth'))
+        
+        if (epoch+1) % 5 == 0:
+            dist.barrier()
+            loss = validate_one_epoch(epoch, validate_dataloader, model, criterion, vinet_mean, vinet_std)
+            if args.local_rank == 0:
+                summary.add_scalar("Validate Loss", loss, global_step=epoch)
 
     dist.destroy_process_group() # cleanup

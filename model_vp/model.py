@@ -1,4 +1,130 @@
-import torch.nn as nn, torch
+import torch.nn as nn, torch, gc
+
+# MMV (append on channel dimension)
+# class SSLOnly(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#         self.layer1a = nn.Sequential(
+#             nn.Conv3d(in_channels=8192, out_channels=512, kernel_size=(3,3,3), padding=(1,1,1)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(0.5, 2, 2), mode='trilinear')
+#         )
+#         self.layer1b = nn.Sequential(
+#             nn.Conv3d(in_channels=2048, out_channels=512, kernel_size=(3,3,3), padding=(1,1,1)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(0.5, 1, 1), mode='trilinear')
+#         )
+#         self.layer1c = nn.Sequential(
+#             nn.Conv3d(in_channels=1024, out_channels=512, kernel_size=(3,3,3), padding=(1,1,1)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(0.5, 1, 1), mode='trilinear'),
+
+#             nn.Conv3d(in_channels=512, out_channels=256, kernel_size=(3,5,5), padding=(1,2,2)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(0.5, 1, 1), mode='trilinear')
+#         )
+#         self.layer1d = nn.Sequential(
+#             nn.Conv3d(in_channels=640, out_channels=320, kernel_size=(3,3,3), padding=(1,1,1)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(0.5, 1, 1), mode='trilinear'),
+
+#             nn.Conv3d(in_channels=320, out_channels=128, kernel_size=(3,5,5), padding=(1,2,2)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(0.5,1,1), mode='trilinear')
+#         )
+#         self.layer2 = nn.Sequential(
+#             nn.Conv3d(in_channels=1024, out_channels=256, kernel_size=(3,5,5), padding=(1,2,2)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(0.5, 2, 2), mode='trilinear')
+#         )
+#         self.layer3 = nn.Sequential(
+#             nn.Conv3d(in_channels=512, out_channels=128, kernel_size=(3,7,7), padding=(1,3,3)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(1, 2, 2), mode='trilinear')
+#         )
+#         self.layer4 = nn.Sequential(
+#             nn.Conv3d(in_channels=256, out_channels=128, kernel_size=(3,9,9), padding=(0,4,4)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(1,2,2), mode='trilinear'),
+
+#             nn.Conv3d(in_channels=128, out_channels=64, kernel_size=(3,7,7), padding=(0,3,3)),
+#             nn.ReLU()
+#         ) # return this output when combining
+#         self.layer5 = nn.Sequential(
+#             nn.Conv3d(in_channels=64, out_channels=32, kernel_size=(3,7,7), padding=(0,3,3)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(1,2,2), mode='trilinear'),
+
+#             nn.Conv3d(in_channels=32, out_channels=8, kernel_size=(2,7,7), padding=(0,3,3)),
+#             nn.ReLU(),
+            
+#             nn.Conv3d(in_channels=8, out_channels=1, kernel_size=(1,7,7), padding=(0,3,3)),
+#             nn.Sigmoid() # Final Activation
+#         )
+#     def forward(self, mmv_embeddings):
+#         # print([r.shape for r in mmv_embeddings]) # [torch.Size([1, 128, 32, 72, 128]), torch.Size([1, 512, 32, 72, 128]), torch.Size([1, 1024, 32, 36, 64]), torch.Size([1, 2048, 32, 18, 32]), torch.Size([1, 4096, 32, 9, 16]), torch.Size([1, 4096, 32, 9, 16])]
+#         s0, s1, s2, s3, s4, s5 = mmv_embeddings
+        
+#         result = torch.cat((s4, s5), dim = 1)
+#         first_two_layers = torch.cat((s0, s1), dim=1)
+#         del s4, s5, s0, s1; gc.collect(); torch.cuda.empty_cache();
+
+#         result = self.layer5(self.layer4(torch.cat((self.layer3(torch.cat((self.layer2(torch.cat((self.layer1a(result), self.layer1b(s3)), dim=1)), self.layer1c(s2)), dim=1)), self.layer1d(first_two_layers)), dim=1)))
+#         return result
+
+# MMV (append on time dimension) CUDA out of memory error
+# class SSLOnly(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#         self.layer1 = nn.Sequential(
+#             nn.Conv3d(8192, 2048, kernel_size=(3, 3, 3), stride=(3,1,1), padding=(0,1,1)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(1,2,2), mode='trilinear')
+#         )
+#         self.layer2 = nn.Sequential(
+#             nn.Conv3d(2048, 1024, kernel_size=(3, 5, 5), stride=(2,1,1), dilation=(2, 1, 1), padding=(0,2,2)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(1,2,2), mode='trilinear')
+#         )
+#         self.layer3 = nn.Sequential(
+#             nn.Conv3d(1024, 512, kernel_size=(3, 5, 5), stride=(3,1,1), dilation=(2,1,1), padding=(0,2,2)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(1,2,2), mode='trilinear')
+#         )
+#         self.layer4 = nn.Sequential(
+#             nn.Conv3d(512, 128, kernel_size=(3,5,5), stride=(3,1,1), dilation=(2,1,1), padding=(0,2,2)),
+#             nn.ReLU()
+#         )
+#         self.layer5 = nn.Sequential(
+#             nn.Conv3d(128, 64, kernel_size=(3,5,5), stride=(3,1,1), dilation=(2,1,1), padding=(0,2,2)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(1,2,2), mode='trilinear')
+#         ) # combine from here
+#         self.layer6 = nn.Sequential(
+#             nn.Conv3d(64, 16, kernel_size=(3,7,7), stride=(3,1,1), dilation=(2,1,1), padding=(0,3,3)),
+#             nn.ReLU(),
+#             nn.Upsample(scale_factor=(1,2,2), mode='trilinear'),
+
+#             nn.Conv3d(16, 1, kernel_size=(4,9,9), padding=(0,4,4)),
+#             nn.Sigmoid()
+#         )
+#     def forward(self, mmv_embeddings):
+#         # print([r.shape for r in mmv_embeddings]) # [torch.Size([1, 128, 32, 72, 128]), torch.Size([1, 512, 32, 72, 128]), torch.Size([1, 1024, 32, 36, 64]), torch.Size([1, 2048, 32, 18, 32]), torch.Size([1, 4096, 32, 9, 16]), torch.Size([1, 4096, 32, 9, 16])]
+#         s0, s1, s2, s3, s4, s5 = mmv_embeddings
+#         result = torch.cat((s4, s5), dim = 1)
+#         del s4, s5; gc.collect(); torch.cuda.empty_cache();
+        
+#         result = self.layer1(result)
+#         result = torch.cat((s3, result), dim=2)
+#         result = self.layer2(result)
+#         result = torch.cat((s2, result), dim=2)
+#         result = self.layer3(result)
+#         result = torch.cat((s1, result), dim=2)
+#         result = self.layer4(result)
+#         result = torch.cat((s0, result), dim=2)
+#         result = self.layer6(self.layer5(result))
+#         gc.collect(); torch.cuda.empty_cache();
+#         return result
 
 #### The below code is from ViNet ####
 
@@ -19,7 +145,11 @@ class VideoSaliencyModel(nn.Module):
 
             nn.ConvTranspose3d(in_channels=2, out_channels=1, kernel_size=(7,7,7), padding=(3,3,3)),
             nn.LeakyReLU(inplace=True),
-            nn.Upsample(scale_factor=(1/(time_width*0.5*0.5),1,1), mode='trilinear')
+            nn.Upsample(scale_factor=(1/(time_width*0.5*0.5),1,1), mode='trilinear'),
+
+            nn.ConvTranspose3d(in_channels=1, out_channels=1, kernel_size=(5,5,5), padding=(2,2,2)),
+            nn.Conv3d(in_channels=1, out_channels=1, kernel_size=(3,3,3), padding=(1,1,1)),
+            nn.Sigmoid()
         )
 
     def forward(self, video_data, mmv_embeddings):
@@ -38,26 +168,26 @@ class VinDecoder(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.layer1 = nn.Sequential(
-            nn.ConvTranspose3d(in_channels=1024, out_channels=64, kernel_size=(3,3,3), padding=(1,1,1)),
+            nn.ConvTranspose3d(in_channels=1024, out_channels=32, kernel_size=(3,3,3), padding=(1,1,1)),
             nn.LeakyReLU(inplace=True),
             nn.Upsample(scale_factor=(2,2,2), mode='trilinear')
         )
         self.layer2 = nn.Sequential(
-            nn.ConvTranspose3d(in_channels=896, out_channels=32, kernel_size=(5,5,5), padding=(2,2,2)),
+            nn.ConvTranspose3d(in_channels=864, out_channels=16, kernel_size=(5,5,5), padding=(2,2,2)),
             nn.LeakyReLU(inplace=True),
             nn.Upsample(scale_factor=(2,2,2), mode='trilinear')
         )
         self.layer3 = nn.Sequential(
-            nn.ConvTranspose3d(in_channels=512, out_channels=16, kernel_size=(7,7,7), padding=(3,3,3)),
+            nn.ConvTranspose3d(in_channels=496, out_channels=8, kernel_size=(7,7,7), padding=(3,3,3)),
             nn.LeakyReLU(inplace=True),
             nn.Upsample(scale_factor=(1,2,2), mode='trilinear')
         )
         self.layer4 = nn.Sequential(
-            nn.ConvTranspose3d(in_channels=208, out_channels=8, kernel_size=(9,9,9), padding=(4,4,4)),
+            nn.ConvTranspose3d(in_channels=200, out_channels=4, kernel_size=(9,9,9), padding=(4,4,4)),
             nn.LeakyReLU(inplace=True),
             nn.Upsample(scale_factor=(2,2,2), mode='trilinear'), # torch.Size([1, 8, 32, 144, 256])
 
-            nn.ConvTranspose3d(in_channels=8, out_channels=4, kernel_size=(7,7,7), padding=(3,3,3)),
+            nn.ConvTranspose3d(in_channels=4, out_channels=4, kernel_size=(7,7,7), padding=(3,3,3)),
             nn.LeakyReLU(inplace=True),
             nn.Upsample(scale_factor=(1,2,2), mode='trilinear')
         )
@@ -75,30 +205,30 @@ class SSLDecoder(nn.Module):
     def __init__(self):
         super().__init__()
         self.layer1 = nn.Sequential(
-            nn.ConvTranspose3d(in_channels=4096, out_channels=64, kernel_size=(3,3,3), padding=(1,1,1)),
+            nn.ConvTranspose3d(in_channels=4096, out_channels=32, kernel_size=(3,3,3), padding=(1,1,1)),
             nn.LeakyReLU(inplace=True)
         )
         self.layer2 = nn.Sequential(
-            nn.ConvTranspose3d(in_channels=4160, out_channels=64, kernel_size=(5,5,5), padding=(2,2,2)),
+            nn.ConvTranspose3d(in_channels=4128, out_channels=32, kernel_size=(5,5,5), padding=(2,2,2)),
             nn.LeakyReLU(inplace=True),
             nn.Upsample(scale_factor=(1,2,2), mode='trilinear')
         )
         self.layer3 = nn.Sequential(
-            nn.ConvTranspose3d(in_channels=2112, out_channels=32, kernel_size=(7,7,7), padding=(3,3,3)),
+            nn.ConvTranspose3d(in_channels=2080, out_channels=16, kernel_size=(7,7,7), padding=(3,3,3)),
             nn.LeakyReLU(inplace=True),
             nn.Upsample(scale_factor=(1,2,2), mode='trilinear')
         )
         self.layer4 = nn.Sequential(
-            nn.ConvTranspose3d(in_channels=1056, out_channels=16, kernel_size=(9,9,9), padding=(4,4,4)),
+            nn.ConvTranspose3d(in_channels=1040, out_channels=8, kernel_size=(9,9,9), padding=(4,4,4)),
             nn.LeakyReLU(inplace=True),
             nn.Upsample(scale_factor=(1,2,2), mode='trilinear')
         )
         self.layer5 = nn.Sequential(
-            nn.ConvTranspose3d(in_channels=656, out_channels=8, kernel_size=(11,11,11), padding=(5,5,5)),
+            nn.ConvTranspose3d(in_channels=648, out_channels=4, kernel_size=(11,11,11), padding=(5,5,5)),
             nn.LeakyReLU(inplace=True),
             nn.Upsample(scale_factor=(1,2,2), mode='trilinear'), # torch.Size([1, 8, 32, 144, 256])
 
-            nn.ConvTranspose3d(in_channels=8, out_channels=4, kernel_size=(7,7,7), padding=(3,3,3)),
+            nn.ConvTranspose3d(in_channels=4, out_channels=4, kernel_size=(7,7,7), padding=(3,3,3)),
             nn.LeakyReLU(inplace=True),
             nn.Upsample(scale_factor=(1,2,2), mode='trilinear')
         )
@@ -238,10 +368,14 @@ class SepConv3d(nn.Module):
         super(SepConv3d, self).__init__()
         self.conv_s = nn.Conv3d(in_planes, out_planes, kernel_size=(1,kernel_size,kernel_size), stride=(1,stride,stride), padding=(0,padding,padding), bias=False)
         self.bn_s = nn.BatchNorm3d(out_planes, eps=1e-3, momentum=0.001, affine=True)
+        for p in self.bn_s.parameters():
+            p.requires_grad = False
         self.relu_s = nn.ReLU()
 
         self.conv_t = nn.Conv3d(out_planes, out_planes, kernel_size=(kernel_size,1,1), stride=(stride,1,1), padding=(padding,0,0), bias=False)
         self.bn_t = nn.BatchNorm3d(out_planes, eps=1e-3, momentum=0.001, affine=True)
+        for p in self.bn_t.parameters():
+            p.requires_grad = False
         self.relu_t = nn.ReLU()
 
     def forward(self, x):
@@ -259,6 +393,8 @@ class BasicConv3d(nn.Module):
         super(BasicConv3d, self).__init__()
         self.conv = nn.Conv3d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=padding, bias=False)
         self.bn = nn.BatchNorm3d(out_planes, eps=1e-3, momentum=0.001, affine=True)
+        for p in self.bn.parameters():
+            p.requires_grad = False
         self.relu = nn.ReLU()
 
     def forward(self, x):
